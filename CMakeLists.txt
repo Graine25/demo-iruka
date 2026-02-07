@@ -36,7 +36,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/sources.cmake")
 endif()
 
 if(WIN32)
-    add_executable(Iruka WIN32 ${IRUKA_SOURCES})
+    add_executable(Iruka WIN32 ${IRUKA_SOURCES} "src/hooks.cpp")
 else()
     add_executable(Iruka ${IRUKA_SOURCES})
 endif()
