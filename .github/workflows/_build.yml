@@ -1,0 +1,217 @@
+name: Build iruka
+
+on:
+  workflow_call:
+    inputs:
+      publish_mode:
+        description: "'artifact' for CI artifacts, 'release' for GitHub release assets"
+        required: true
+        type: string
+      artifact_prefix:
+        description: "Artifact prefix when publish_mode is 'artifact'"
+        required: false
+        type: string
+        default: iruka
+
+env:
+  REXSDK_REPO: Graine25/rexglue-sdk
+  REXSDK_TAG: nightly-20260731-ac3e857f
+  # The nightly's package config reports this numeric compatibility version.
+  REXSDK_VERSION: 0.9.0.0
+  ASSETS_ARCHIVE: assets/assets.zip
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win-amd64
+            runner: windows-latest
+            preset: win-amd64-release
+            executable: iruka.exe
+          - platform: win-arm64
+            runner: windows-11-arm
+            preset: win-arm64-release
+            executable: iruka.exe
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            preset: linux-amd64-release
+            executable: iruka
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            preset: linux-arm64-release
+            executable: iruka
+          - platform: mac-amd64
+            runner: macos-26-intel
+            preset: mac-amd64-release
+            executable: iruka
+          - platform: mac-arm64
+            runner: macos-26
+            preset: mac-arm64-release
+            executable: iruka
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install toolchain (Windows AMD64)
+        if: matrix.platform == 'win-amd64'
+        shell: pwsh
+        run: choco install llvm cmake ninja -y
+
+      - name: Configure toolchain (Windows ARM64)
+        if: matrix.platform == 'win-arm64'
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (Test-Path $llvm) {
+            Add-Content -Path $env:GITHUB_PATH -Value $llvm
+            $env:PATH = "$llvm;$env:PATH"
+          }
+          clang --version
+          cmake --version
+          ninja --version
+
+      - name: Install toolchain and dependencies (Linux)
+        if: startsWith(matrix.platform, 'linux-')
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg lsb-release
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt-get install -y clang-20 lld-20 cmake ninja-build build-essential git curl unzip zip autoconf python3.12-venv \
+            libgtk-3-dev libx11-xcb-dev libxss-dev libvulkan-dev glslc glslang-tools \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev
+
+      - name: Install dependencies (macOS)
+        if: startsWith(matrix.platform, 'mac-')
+        shell: bash
+        run: brew install cmake ninja vulkan-loader molten-vk
+
+      - name: Set up sccache
+        uses: hendrikmuhs/ccache-action@v1.2.22
+        with:
+          variant: sccache
+          key: ${{ matrix.platform }}
+
+      - name: Download ReXGlue SDK
+        shell: bash
+        run: |
+          asset="rexglue-sdk-0.9.0.0-dev.unknown-${{ matrix.platform }}.zip"
+          url="https://github.com/${REXSDK_REPO}/releases/download/${REXSDK_TAG}/${asset}"
+          curl -fsSL "$url" -o sdk.zip
+          unzip -q sdk.zip -d sdk
+          test -d "sdk/${{ matrix.platform }}"
+
+      - name: Extract repository assets for codegen
+        shell: bash
+        run: |
+          test -f "$ASSETS_ARCHIVE"
+          unzip -qo "$ASSETS_ARCHIVE" -d assets
+          test -f assets/default.xex
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake --preset "${{ matrix.preset }}" \
+            "-DCMAKE_PREFIX_PATH=$PWD/sdk/${{ matrix.platform }}" \
+            "-DREXSDK_VERSION=${REXSDK_VERSION}" \
+            "-DCMAKE_C_COMPILER_LAUNCHER=sccache" \
+            "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
+
+      - name: Codegen
+        shell: bash
+        env:
+          # Tracy's invariant-TSC probe can fail on virtualized Intel runners.
+          # Codegen does not require profiler-grade timer accuracy.
+          TRACY_NO_INVARIANT_CHECK: "1"
+        run: cmake --build --preset "${{ matrix.preset }}" --target iruka_codegen
+
+      - name: Reconfigure generated sources
+        shell: bash
+        run: |
+          cmake --preset "${{ matrix.preset }}" \
+            "-DCMAKE_PREFIX_PATH=$PWD/sdk/${{ matrix.platform }}" \
+            "-DREXSDK_VERSION=${REXSDK_VERSION}" \
+            "-DCMAKE_C_COMPILER_LAUNCHER=sccache" \
+            "-DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
+
+      - name: Build
+        shell: bash
+        run: cmake --build --preset "${{ matrix.preset }}" --parallel
+
+      - name: Verify runtime configuration
+        shell: bash
+        run: |
+          config="out/build/${{ matrix.preset }}/iruka.toml"
+          test -f "$config"
+          grep -Eq '^iruka_data_root[[:space:]]*=[[:space:]]*"assets"$' "$config"
+
+      - name: Stage package
+        shell: bash
+        run: |
+          build_dir="out/build/${{ matrix.preset }}"
+          package_dir="dist/iruka-${{ matrix.platform }}"
+          mkdir -p "$package_dir/assets"
+          cp "$build_dir/${{ matrix.executable }}" "$package_dir/"
+          cp "$build_dir/iruka.toml" "$package_dir/"
+          find "$build_dir" -maxdepth 1 -type f \( -name '*.dll' -o -name '*.so' -o -name '*.dylib' \) \
+            -exec cp {} "$package_dir/" \;
+          if [ -d "$build_dir/vulkan" ]; then
+            cp -R "$build_dir/vulkan" "$package_dir/"
+          fi
+          unzip -qo "$ASSETS_ARCHIVE" -d "$package_dir/assets"
+          test -f "$package_dir/iruka.toml"
+          test -f "$package_dir/assets/default.xex"
+          (cd dist && cmake -E tar cf "iruka-${{ matrix.platform }}.zip" --format=zip "iruka-${{ matrix.platform }}")
+          archive="dist/iruka-${{ matrix.platform }}.zip"
+          test -f "$archive"
+          unzip -l "$archive" | grep -Fq "iruka-${{ matrix.platform }}/iruka.toml"
+          unzip -l "$archive" | grep -Fq "iruka-${{ matrix.platform }}/${{ matrix.executable }}"
+
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
+
+      - name: Upload CI artifact
+        if: inputs.publish_mode == 'artifact'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ matrix.platform }}
+          path: dist/iruka-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+      - name: Stage release artifact
+        if: inputs.publish_mode == 'release'
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/iruka-${{ matrix.platform }}.zip
+          if-no-files-found: error
+
+  publish-release:
+    if: inputs.publish_mode == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

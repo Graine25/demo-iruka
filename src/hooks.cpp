@@ -1,14 +1,12 @@
-#include <rex/runtime/guest/function.h>
-#include "generated/iruka_init.h"
+#include <rex/cvar.h>
+#include <rex/types.h>
+#include <rex/system/kernel_state.h>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cmath>
+#include <cstring>
 
-// Memory functions
-GUEST_FUNCTION_HOOK(sub_8208EB80, memset)
-GUEST_FUNCTION_HOOK(sub_8208F1F0, memcpy)
-GUEST_FUNCTION_HOOK(sub_8208F760, memmove)
+REXCVAR_DEFINE_STRING(iruka_data_root, "", "WebOfShadows/config",
+                      "Path to game asset directory. Overrides the default data root when non-empty.");
 
-// String functions
-GUEST_FUNCTION_HOOK(sub_8208FBE0, strncmp)
-GUEST_FUNCTION_HOOK(sub_82090348, strncpy)
-
-// Math functions
-GUEST_FUNCTION_HOOK(sub_82263CF0, atof)

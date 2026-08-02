@@ -1,0 +1,3 @@
+# Runtime configuration. CMake copies this file next to the iruka executable.
+iruka_data_root = "assets"
+gpu_plugin = "xenos"
